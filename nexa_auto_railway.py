@@ -1,443 +1,314 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NEXA Services — Script d'automatisation Facebook (version Railway)
-==================================================================
-Ce script tourne 24h/24 sur Railway.app et publie automatiquement
-tes posts planifiés sur ta page Facebook NEXA Services.
+NEXA Services — Script d'automatisation Facebook v2 (Railway)
+=============================================================
+Génère ET publie automatiquement les posts via Claude API.
 
-VARIABLES D'ENVIRONNEMENT À CONFIGURER SUR RAILWAY :
-  PAGE_ID            → ton Page ID Facebook
-  PAGE_ACCESS_TOKEN  → ton Page Access Token
-  WA_NUMBER          → ton numéro WhatsApp (ex: +225 07 00 00 00 00)
-
-FICHIERS NÉCESSAIRES DANS LE REPO GITHUB :
-  nexa_auto_railway.py  ← ce fichier
-  requirements.txt
-  Procfile
-  NEXA_sauvegarde.json  ← exporté depuis la plateforme NEXA
+VARIABLES RAILWAY :
+  PAGE_ID            → Page ID Facebook
+  PAGE_ACCESS_TOKEN  → Page Access Token
+  WA_NUMBER          → WhatsApp (+225 07 00 00 00 00)
+  CLAUDE_API_KEY     → Clé API Claude (sk-ant-...)
 """
 
-import json
-import os
-import time
-import logging
-import requests
-import schedule
+import json, os, time, logging, requests, schedule
 from datetime import datetime, date
-from pathlib import Path
 
-# ═══════════════════════════════════════════════════════
-#  CONFIGURATION — Lues depuis les variables Railway
-# ═══════════════════════════════════════════════════════
-
+# ── CONFIG ──
 PAGE_ID           = os.environ.get("PAGE_ID", "")
 PAGE_ACCESS_TOKEN = os.environ.get("PAGE_ACCESS_TOKEN", "")
 WA_NUMBER         = os.environ.get("WA_NUMBER", "+225 07 00 00 00 00")
-EXPORT_FILE       = os.environ.get("EXPORT_FILE", "NEXA_sauvegarde.json")
-HEURES            = ["07:00", "12:00", "18:00", "20:00"]
+CLAUDE_API_KEY    = os.environ.get("CLAUDE_API_KEY", "")
+EXPORT_FILE       = "NEXA_sauvegarde.json"
+HEURES_PUB        = ["07:00", "12:00", "18:00", "20:00"]
 FB_API            = "https://graph.facebook.com/v25.0"
+CLAUDE_API        = "https://api.anthropic.com/v1/messages"
 POSTS_PUBLIES_FILE = "posts_publies.json"
 
-# ═══════════════════════════════════════════════════════
-#  LOGS — Affichés dans Railway Dashboard
-# ═══════════════════════════════════════════════════════
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler()]
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
+                    handlers=[logging.StreamHandler()])
 log = logging.getLogger("NEXA")
 
-# ═══════════════════════════════════════════════════════
-#  VÉRIFICATION DES VARIABLES AU DÉMARRAGE
-# ═══════════════════════════════════════════════════════
-
+# ── VÉRIFICATION ──
 def verifier_config():
-    """Vérifie que les variables Railway sont bien renseignées."""
-    erreurs = []
-    if not PAGE_ID or PAGE_ID == "":
-        erreurs.append("PAGE_ID manquant — ajoute-le dans Railway > Variables")
-    if not PAGE_ACCESS_TOKEN or PAGE_ACCESS_TOKEN == "":
-        erreurs.append("PAGE_ACCESS_TOKEN manquant — ajoute-le dans Railway > Variables")
-    if erreurs:
-        for e in erreurs:
-            log.error(f"❌ {e}")
-        return False
-    log.info(f"✅ Variables Railway chargées — Page ID : {PAGE_ID[:8]}...")
-    return True
+    ok = True
+    if not PAGE_ID:           log.error("❌ PAGE_ID manquant"); ok = False
+    if not PAGE_ACCESS_TOKEN: log.error("❌ PAGE_ACCESS_TOKEN manquant"); ok = False
+    if not CLAUDE_API_KEY:    log.warning("⚠️ CLAUDE_API_KEY manquante — génération auto désactivée")
+    return ok
 
-# ═══════════════════════════════════════════════════════
-#  FACEBOOK API
-# ═══════════════════════════════════════════════════════
-
+# ── FACEBOOK ──
 def test_connexion():
-    """Vérifie que le token Facebook est valide."""
-    url = f"{FB_API}/{PAGE_ID}"
-    params = {"fields": "name,fan_count", "access_token": PAGE_ACCESS_TOKEN}
     try:
-        r = requests.get(url, params=params, timeout=10)
-        data = r.json()
-        if "error" in data:
-            log.error(f"❌ Token invalide : {data['error']['message']}")
-            return False
-        fans = data.get('fan_count', 0)
-        log.info(f"✅ Connecté : {data.get('name')} — {fans} abonnés")
+        r = requests.get(f"{FB_API}/{PAGE_ID}", params={"fields":"name,fan_count","access_token":PAGE_ACCESS_TOKEN}, timeout=10)
+        d = r.json()
+        if "error" in d: log.error(f"❌ Token invalide : {d['error']['message']}"); return False
+        log.info(f"✅ Connecté : {d.get('name')} — {d.get('fan_count',0)} abonnés")
         return True
-    except Exception as e:
-        log.error(f"❌ Erreur connexion : {e}")
-        return False
-
+    except Exception as e: log.error(f"❌ {e}"); return False
 
 def publier_texte(texte):
-    """Publie un post texte sur la page Facebook."""
-    url = f"{FB_API}/{PAGE_ID}/feed"
-    data = {"message": texte, "access_token": PAGE_ACCESS_TOKEN}
     try:
-        r = requests.post(url, data=data, timeout=30)
-        result = r.json()
-        if "id" in result:
-            log.info(f"✅ Post publié — ID Facebook : {result['id']}")
-            return result["id"]
-        else:
-            msg = result.get('error', {}).get('message', 'Erreur inconnue')
-            log.error(f"❌ Échec publication : {msg}")
-            return None
-    except Exception as e:
-        log.error(f"❌ Erreur publication : {e}")
-        return None
+        r = requests.post(f"{FB_API}/{PAGE_ID}/feed", data={"message":texte,"access_token":PAGE_ACCESS_TOKEN}, timeout=30)
+        d = r.json()
+        if "id" in d: log.info(f"✅ Publié — ID: {d['id']}"); return d["id"]
+        log.error(f"❌ {d.get('error',{}).get('message','Erreur')}"); return None
+    except Exception as e: log.error(f"❌ {e}"); return None
 
-
-def publier_avec_photo(texte, url_photo_base64):
-    """Publie un post avec une image encodée en base64."""
+def publier_avec_photo(texte, src_b64):
     import base64, tempfile
-    url_api = f"{FB_API}/{PAGE_ID}/photos"
     try:
-        # Décoder le base64 en fichier temporaire
-        if url_photo_base64.startswith("data:"):
-            header, data_b64 = url_photo_base64.split(",", 1)
-        else:
-            data_b64 = url_photo_base64
-        img_data = base64.b64decode(data_b64)
+        data_b64 = src_b64.split(",",1)[1] if src_b64.startswith("data:") else src_b64
+        img = base64.b64decode(data_b64)
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            tmp.write(img_data)
-            tmp_path = tmp.name
-        with open(tmp_path, "rb") as f:
-            files = {"source": ("photo.jpg", f, "image/jpeg")}
-            data = {"message": texte, "access_token": PAGE_ACCESS_TOKEN}
-            r = requests.post(url_api, files=files, data=data, timeout=60)
+            tmp.write(img); tmp_path = tmp.name
+        with open(tmp_path,"rb") as f:
+            r = requests.post(f"{FB_API}/{PAGE_ID}/photos",
+                files={"source":("photo.jpg",f,"image/jpeg")},
+                data={"message":texte,"access_token":PAGE_ACCESS_TOKEN}, timeout=60)
         os.unlink(tmp_path)
-        result = r.json()
-        if "id" in result:
-            log.info(f"✅ Post avec photo publié — ID : {result['id']}")
-            return result["id"]
-        else:
-            log.warning("⚠️ Upload photo échoué — publication sans photo")
-            return publier_texte(texte)
-    except Exception as e:
-        log.error(f"❌ Erreur upload photo : {e}")
+        d = r.json()
+        if "id" in d: log.info(f"✅ Publié avec photo — ID: {d['id']}"); return d["id"]
         return publier_texte(texte)
+    except Exception as e: log.error(f"❌ Photo: {e}"); return publier_texte(texte)
 
-
-def repondre_messenger(sender_id, texte):
-    """Envoie une réponse via Messenger."""
-    url = f"{FB_API}/me/messages"
-    data = {
-        "recipient": {"id": sender_id},
-        "message": {"text": texte},
-        "access_token": PAGE_ACCESS_TOKEN
-    }
+# ── CLAUDE API ──
+def generer_post_ia(bien, type_post, page, contexte=""):
+    if not CLAUDE_API_KEY:
+        return generer_texte_fallback(bien, type_post, page)
+    cats = {"appart":"appartement meublé","villa":"villa avec piscine","voiture":"véhicule de location","bureau":"bureau équipé","autre":"bien en location"}
+    cat = cats.get(bien.get("cat","appart"), "bien en location")
+    prompt = (
+        f"Expert marketing immobilier Côte d'Ivoire. Rédige un post Facebook pour :\n"
+        f"Page : {page.get('name','NEXA Services')} | WhatsApp : {page.get('wa', WA_NUMBER)}\n"
+        f"Bien : {cat} \"{bien.get('name','')}\" à {bien.get('zone','')} | Prix : {bien.get('prix','')} FCFA\n"
+        f"Équipements : {bien.get('equip','')}\n"
+        f"Description : {bien.get('desc','')}\n"
+        f"Disponibilité : {bien.get('dispo','disponible')}\n"
+        f"Type de post : {type_post}{' | Contexte : ' + contexte if contexte else ''}\n"
+        f"Hashtags : {page.get('ht','#NEXAServices #LocationAbidjan')}\n"
+        f"Rédige un post complet : accroche, 2-3 paragraphes, emojis, hashtags, call-to-action WhatsApp. "
+        f"Français, marché ivoirien, 150-200 mots."
+    )
     try:
-        r = requests.post(url, json=data, timeout=10)
-        return "message_id" in r.json()
+        r = requests.post(CLAUDE_API,
+            headers={"Content-Type":"application/json","x-api-key":CLAUDE_API_KEY,"anthropic-version":"2023-06-01"},
+            json={"model":"claude-sonnet-4-20250514","max_tokens":600,"messages":[{"role":"user","content":prompt}]},
+            timeout=30)
+        d = r.json()
+        if "error" in d: raise Exception(d["error"].get("message","Erreur Claude"))
+        texte = d["content"][0]["text"]
+        log.info(f"✅ Post généré par IA pour {bien.get('name','')}")
+        return texte
     except Exception as e:
-        log.error(f"❌ Erreur Messenger : {e}")
-        return False
+        log.warning(f"⚠️ Claude API: {e} — fallback texte simple")
+        return generer_texte_fallback(bien, type_post, page)
 
-# ═══════════════════════════════════════════════════════
-#  GESTION DES POSTS PLANIFIÉS
-# ═══════════════════════════════════════════════════════
+def generer_texte_fallback(bien, type_post, page):
+    wa = page.get("wa", WA_NUMBER)
+    ht = page.get("ht", "#NEXAServices #LocationAbidjan")
+    nom = bien.get("name",""); zone = bien.get("zone",""); prix = bien.get("prix",""); equip = bien.get("equip","")
+    emojis = {"appart":"🏠","villa":"🏡","voiture":"🚗","bureau":"🏢","autre":"📦"}
+    e = emojis.get(bien.get("cat","appart"),"🏠")
+    if type_post == "Promotion":
+        return f"🔥 OFFRE SPÉCIALE — {nom}\n\n📍 {zone}\n💰 {prix} FCFA\n✅ {equip}\n\n⚡ Réservez vite !\n📲 WhatsApp : {wa}\n\n{ht}"
+    elif type_post == "Présentation":
+        return f"✨ Découvrez {nom}\n\n📍 {zone}\n💰 {prix} FCFA\n🛎️ {equip}\n\n📲 {wa}\n\n{ht}"
+    else:
+        return f"{e} {nom} est disponible !\n\n📍 {zone}\n💰 {prix} FCFA\n✅ {equip}\n\n📲 {wa}\n\n{ht}"
 
+# ── GÉNÉRATION AUTOMATIQUE HEBDOMADAIRE ──
+TYPES_ROTATION = ["Disponibilité", "Présentation", "Promotion", "Disponibilité", "Weekend spécial", "Présentation", "Promotion"]
+
+def generer_et_planifier_semaine():
+    log.info("🤖 Génération automatique des posts de la semaine...")
+    data = charger_export()
+    if not data: return
+    biens = data.get("biens", [])
+    page  = data.get("page", {})
+    if not biens: log.warning("⚠️ Aucun bien dans le fichier export"); return
+
+    aujourd_hui = date.today()
+    posts_generes = []
+    for i, bien in enumerate(biens):
+        # Un post par bien, réparti sur les 7 prochains jours
+        jour = aujourd_hui.fromordinal(aujourd_hui.toordinal() + (i % 7))
+        type_post = TYPES_ROTATION[i % len(TYPES_ROTATION)]
+        texte = generer_post_ia(bien, type_post, page)
+        photo = trouver_meilleure_photo(bien)
+        posts_generes.append({
+            "date": jour.isoformat(),
+            "time": "18:00",
+            "type": type_post,
+            "text": texte,
+            "bienId": bien.get("id"),
+            "bienName": bien.get("name"),
+            "bienCat": bien.get("cat"),
+            "photo": photo
+        })
+        time.sleep(0.5)  # Éviter le rate limiting
+
+    # Sauvegarder les posts générés
+    with open("posts_semaine.json","w",encoding="utf-8") as f:
+        json.dump(posts_generes, f, ensure_ascii=False, indent=2)
+    log.info(f"✅ {len(posts_generes)} posts générés et sauvegardés pour la semaine")
+
+def trouver_meilleure_photo(bien):
+    medias = bien.get("media", [])
+    for m in medias:
+        if m.get("isOpt") and m.get("type") == "photo":
+            src = m.get("optimizedSrc") or m.get("src","")
+            if src.startswith("data:image"): return src
+    for m in medias:
+        if m.get("type") == "photo":
+            src = m.get("src","")
+            if src.startswith("data:image"): return src
+    return None
+
+# ── PUBLICATION DU JOUR ──
 POSTS_PUBLIES = set()
-
 
 def charger_posts_publies():
     global POSTS_PUBLIES
     if os.path.exists(POSTS_PUBLIES_FILE):
         try:
-            with open(POSTS_PUBLIES_FILE, "r", encoding="utf-8") as f:
+            with open(POSTS_PUBLIES_FILE,"r",encoding="utf-8") as f:
                 POSTS_PUBLIES = set(json.load(f))
-        except Exception:
-            POSTS_PUBLIES = set()
-    log.info(f"📋 {len(POSTS_PUBLIES)} posts déjà publiés en mémoire")
-
+        except: pass
+    log.info(f"📋 {len(POSTS_PUBLIES)} posts déjà publiés")
 
 def sauvegarder_posts_publies():
-    with open(POSTS_PUBLIES_FILE, "w", encoding="utf-8") as f:
+    with open(POSTS_PUBLIES_FILE,"w",encoding="utf-8") as f:
         json.dump(list(POSTS_PUBLIES), f)
 
-
 def charger_export():
-    """Charge le fichier JSON exporté depuis la plateforme NEXA."""
-    if not os.path.exists(EXPORT_FILE):
-        log.warning(f"⚠️ Fichier {EXPORT_FILE} non trouvé — aucun post à publier")
-        return None
-    try:
-        with open(EXPORT_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        nb_biens = len(data.get("biens", []))
-        nb_posts = len(data.get("scheduled", []))
-        log.info(f"📂 Export chargé : {nb_biens} biens, {nb_posts} posts planifiés")
-        return data
-    except Exception as e:
-        log.error(f"❌ Erreur lecture export : {e}")
-        return None
-
-
-def generer_texte(post, biens, page):
-    """Génère le texte du post depuis les données du bien."""
-    # Texte complet déjà disponible
-    texte = post.get("text", "")
-    if texte and not texte.endswith("…"):
-        return texte
-
-    # Reconstruire depuis les infos du bien
-    bien_id = str(post.get("bienId", ""))
-    bien = next((b for b in biens if str(b.get("id")) == bien_id), None)
-    wa = page.get("wa", WA_NUMBER)
-    ht = page.get("ht", "#NEXAServices #LocationAbidjan")
-    type_post = post.get("type", "Disponibilité")
-
-    if not bien:
-        return f"📢 Nouveau post NEXA Services\n\n📲 Contactez-nous : {wa}\n\n{ht}"
-
-    nom   = bien.get("name", "")
-    zone  = bien.get("zone", "")
-    prix  = bien.get("prix", "")
-    equip = bien.get("equip", "")
-    dispo = bien.get("dispo", "disponible")
-    cat   = bien.get("cat", "appart")
-
-    emojis = {"appart": "🏠", "villa": "🏡", "voiture": "🚗", "bureau": "🏢", "autre": "📦"}
-    emoji = emojis.get(cat, "🏠")
-
-    if type_post == "Disponibilité":
-        texte = f"{emoji} {nom} est disponible !\n\n📍 {zone}\n💰 À partir de {prix} FCFA\n✅ {equip}\n\n📲 Réservation rapide sur WhatsApp :\n{wa}\n\n{ht}"
-    elif type_post == "Promotion":
-        texte = f"🔥 OFFRE SPÉCIALE — {nom}\n\n📍 {zone}\n💰 {prix} FCFA seulement !\n✅ {equip}\n\n⚡ Offre limitée ! Réservez vite :\n{wa}\n\n{ht}"
-    elif type_post == "Présentation":
-        texte = f"✨ Découvrez {nom}\n\n📍 {zone}\n💰 {prix} FCFA\n🛎️ {equip}\n\n📲 Informations et réservations :\n{wa}\n\n{ht}"
-    elif type_post == "Weekend spécial":
-        texte = f"🌟 Weekend parfait au {nom} !\n\n📍 {zone}\n💰 {prix} FCFA\n✅ {equip}\n\n📲 Disponible ce weekend — réservez :\n{wa}\n\n{ht}"
-    else:
-        texte = f"{emoji} {nom} — {zone}\n💰 {prix} FCFA\n\n📲 {wa}\n\n{ht}"
-
-    return texte
-
-
-def trouver_meilleure_photo(post, biens):
-    """Trouve la meilleure photo optimisée pour ce post."""
-    bien_id = str(post.get("bienId", ""))
-    mids = post.get("mids", [])
-    bien = next((b for b in biens if str(b.get("id")) == bien_id), None)
-    if not bien:
-        return None
-    medias = bien.get("media", [])
-    # Priorité aux médias sélectionnés dans le post
-    if mids:
-        for m in medias:
-            if str(m.get("id")) in [str(mid) for mid in mids]:
-                src = m.get("optimizedSrc") or m.get("src")
-                if src and src.startswith("data:image"):
-                    return src
-    # Sinon premier média optimisé du bien
-    for m in medias:
-        if m.get("isOpt") and m.get("type") == "photo":
-            src = m.get("optimizedSrc") or m.get("src")
-            if src and src.startswith("data:image"):
-                return src
-    # Sinon premier média photo
-    for m in medias:
-        if m.get("type") == "photo":
-            src = m.get("src")
-            if src and src.startswith("data:image"):
-                return src
+    # Essayer d'abord le fichier de la semaine généré automatiquement
+    for fname in ["posts_semaine.json", EXPORT_FILE]:
+        if os.path.exists(fname):
+            try:
+                with open(fname,"r",encoding="utf-8") as f:
+                    data = json.load(f)
+                # posts_semaine.json est une liste directe
+                if isinstance(data, list):
+                    return {"scheduled": data, "biens": [], "page": {}}
+                log.info(f"📂 {fname} chargé : {len(data.get('biens',[]))} biens, {len(data.get('scheduled',[]))} posts")
+                return data
+            except Exception as e:
+                log.error(f"❌ Erreur lecture {fname}: {e}")
+    log.warning("⚠️ Aucun fichier de posts trouvé")
     return None
 
-
 def publier_posts_du_jour():
-    """Publie tous les posts prévus pour aujourd'hui."""
-    log.info("─" * 50)
+    log.info("─"*50)
     log.info("🚀 Vérification des posts à publier...")
     data = charger_export()
-    if not data:
-        return
-
-    biens     = data.get("biens", [])
-    page      = data.get("page", {})
-    scheduled = data.get("scheduled", [])
-    aujourdhui = date.today().isoformat()
-
-    posts_jour = [p for p in scheduled if p.get("date") == aujourdhui]
-    log.info(f"📅 {len(posts_jour)} post(s) prévu(s) pour aujourd'hui ({aujourdhui})")
-
-    if not posts_jour:
-        log.info("✅ Rien à publier aujourd'hui")
-        return
+    if not data: return
+    aujourd_hui = date.today().isoformat()
+    posts_jour = [p for p in data.get("scheduled",[]) if p.get("date") == aujourd_hui]
+    log.info(f"📅 {len(posts_jour)} post(s) pour aujourd'hui ({aujourd_hui})")
+    if not posts_jour: log.info("✅ Rien à publier aujourd'hui"); return
 
     publies = 0
     for post in posts_jour:
-        post_id = f"{post.get('date')}_{post.get('bienId')}_{post.get('type')}"
-        if post_id in POSTS_PUBLIES:
-            log.info(f"⏩ Déjà publié : {post.get('bienName')} / {post.get('type')}")
-            continue
-
-        texte = generer_texte(post, biens, page)
-        photo = trouver_meilleure_photo(post, biens)
-
-        log.info(f"📤 Publication : {post.get('bienName')} / {post.get('type')} {'📷' if photo else '📝'}")
-
+        pid = f"{post.get('date')}_{post.get('bienId')}_{post.get('type')}"
+        if pid in POSTS_PUBLIES: log.info(f"⏩ Déjà publié : {post.get('bienName')}"); continue
+        texte = post.get("text","")
+        if not texte: continue
+        photo = post.get("photo")
+        log.info(f"📤 {post.get('bienName')} / {post.get('type')} {'📷' if photo else '📝'}")
         result = publier_avec_photo(texte, photo) if photo else publier_texte(texte)
-
         if result:
-            POSTS_PUBLIES.add(post_id)
-            sauvegarder_posts_publies()
-            publies += 1
-            if len(posts_jour) > 1:
-                log.info("⏳ Pause 30 min avant le prochain post...")
-                time.sleep(30 * 60)
+            POSTS_PUBLIES.add(pid); sauvegarder_posts_publies(); publies += 1
+            if len(posts_jour) > 1: time.sleep(30*60)
+    log.info(f"✅ {publies}/{len(posts_jour)} post(s) publiés")
 
-    log.info(f"✅ {publies}/{len(posts_jour)} post(s) publié(s) aujourd'hui")
-
-# ═══════════════════════════════════════════════════════
-#  RÉPONSES AUTOMATIQUES MESSENGER
-# ═══════════════════════════════════════════════════════
-
+# ── MESSENGER ──
 REPONSES = {
-    "appartement": f"Bonjour 😊 Nous avons plusieurs appartements disponibles à Abidjan. Précisez votre quartier, dates et nombre de personnes → WhatsApp : {WA_NUMBER}",
-    "appart":      f"Bonjour 😊 Nous avons plusieurs appartements disponibles. → WhatsApp : {WA_NUMBER}",
-    "villa":       f"Bonjour 🏡 Nous proposons des villas avec piscine. Partagez vos dates → WhatsApp : {WA_NUMBER}",
-    "piscine":     f"Bonjour 🏊 Nos villas avec piscine sont disponibles ! → WhatsApp : {WA_NUMBER}",
-    "voiture":     f"Bonjour 🚗 Flotte de véhicules disponibles. Quelle période ? → WhatsApp : {WA_NUMBER}",
-    "vehicle":     f"Bonjour 🚗 Flotte de véhicules disponibles. → WhatsApp : {WA_NUMBER}",
+    "appartement": f"Bonjour 😊 Nous avons plusieurs appartements disponibles à Abidjan. → WhatsApp : {WA_NUMBER}",
+    "appart":      f"Bonjour 😊 Appartements disponibles ! → WhatsApp : {WA_NUMBER}",
+    "villa":       f"Bonjour 🏡 Villas avec piscine disponibles ! → WhatsApp : {WA_NUMBER}",
+    "voiture":     f"Bonjour 🚗 Véhicules disponibles ! → WhatsApp : {WA_NUMBER}",
     "prix":        "Appartements dès 35 000 FCFA/nuit · Villas dès 80 000 FCFA/nuit · Voitures dès 25 000 FCFA/jour.",
     "tarif":       "Appartements dès 35 000 FCFA/nuit · Villas dès 80 000 FCFA/nuit · Voitures dès 25 000 FCFA/jour.",
-    "combien":     "Appartements dès 35 000 FCFA/nuit · Villas dès 80 000 FCFA/nuit · Voitures dès 25 000 FCFA/jour.",
-    "disponible":  f"Bonjour ! Précisez le type de bien, vos dates et le nombre de personnes → WhatsApp : {WA_NUMBER}",
-    "reserv":      f"Bonjour ! Pour réserver, contactez-nous sur WhatsApp : {WA_NUMBER}",
-    "merci":       "Merci pour votre confiance ! 🙏 Un avis sur notre page nous aide beaucoup. À bientôt !",
-    "bonjour":     f"Bonjour ! 😊 Comment pouvons-nous vous aider ? Appartements, villas, voitures… → WhatsApp : {WA_NUMBER}",
+    "disponible":  f"Bonjour ! Précisez le type de bien et vos dates → WhatsApp : {WA_NUMBER}",
+    "reserv":      f"Pour réserver → WhatsApp : {WA_NUMBER}",
+    "bonjour":     f"Bonjour 😊 Comment puis-je vous aider ? → WhatsApp : {WA_NUMBER}",
+    "merci":       "Merci pour votre confiance ! 🙏 À bientôt !",
 }
-
 MESSAGES_TRAITES = set()
 
-
 def verifier_messages():
-    """Vérifie et répond aux nouveaux messages Messenger."""
-    url = f"{FB_API}/{PAGE_ID}/conversations"
-    params = {
-        "fields": "messages.limit(1){message,from,created_time,id}",
-        "access_token": PAGE_ACCESS_TOKEN
-    }
     try:
-        r = requests.get(url, params=params, timeout=10)
-        data = r.json()
-        conversations = data.get("data", [])
-
-        for conv in conversations[:10]:
-            messages = conv.get("messages", {}).get("data", [])
-            if not messages:
-                continue
-            msg = messages[0]
-            msg_id   = msg.get("id", "")
-            texte    = msg.get("message", "").lower()
-            expediteur = msg.get("from", {})
-
-            # Ignorer nos propres messages et déjà traités
-            if str(expediteur.get("id")) == str(PAGE_ID):
-                continue
-            if msg_id in MESSAGES_TRAITES:
-                continue
-
-            # Chercher une réponse
-            for mot_cle, reponse in REPONSES.items():
-                if mot_cle in texte:
-                    ok = repondre_messenger(expediteur["id"], reponse)
-                    if ok:
-                        log.info(f"💬 Réponse envoyée à {expediteur.get('name','?')} (mot-clé: {mot_cle})")
-                        MESSAGES_TRAITES.add(msg_id)
+        r = requests.get(f"{FB_API}/{PAGE_ID}/conversations",
+            params={"fields":"messages.limit(1){message,from,id}","access_token":PAGE_ACCESS_TOKEN}, timeout=10)
+        for conv in r.json().get("data",[])[:10]:
+            msgs = conv.get("messages",{}).get("data",[])
+            if not msgs: continue
+            msg = msgs[0]; mid = msg.get("id",""); texte = msg.get("message","").lower()
+            exp = msg.get("from",{})
+            if str(exp.get("id")) == str(PAGE_ID) or mid in MESSAGES_TRAITES: continue
+            for mot, rep in REPONSES.items():
+                if mot in texte:
+                    r2 = requests.post(f"{FB_API}/me/messages",
+                        json={"recipient":{"id":exp["id"]},"message":{"text":rep},"access_token":PAGE_ACCESS_TOKEN}, timeout=10)
+                    if "message_id" in r2.json():
+                        log.info(f"💬 Réponse à {exp.get('name','?')} (mot-clé: {mot})")
+                        MESSAGES_TRAITES.add(mid)
                     break
-
-    except Exception as e:
-        log.error(f"❌ Erreur Messenger : {e}")
-
-
-# ═══════════════════════════════════════════════════════
-#  RAPPORT HEBDOMADAIRE
-# ═══════════════════════════════════════════════════════
+    except Exception as e: log.error(f"❌ Messenger: {e}")
 
 def rapport_hebdomadaire():
-    """Affiche les stats de la page."""
     log.info("📊 Rapport hebdomadaire NEXA Services")
-    url = f"{FB_API}/{PAGE_ID}/insights"
-    params = {
-        "metric": "page_impressions,page_post_engagements,page_fans",
-        "period": "week",
-        "access_token": PAGE_ACCESS_TOKEN
-    }
     try:
-        r = requests.get(url, params=params, timeout=10)
-        data = r.json()
-        for metric in data.get("data", []):
-            valeurs = metric.get("values", [])
-            val = valeurs[-1].get("value", 0) if valeurs else 0
-            log.info(f"   📈 {metric.get('name')} : {val}")
-    except Exception as e:
-        log.error(f"❌ Erreur rapport : {e}")
+        r = requests.get(f"{FB_API}/{PAGE_ID}/insights",
+            params={"metric":"page_impressions,page_post_engagements,page_fans","period":"week","access_token":PAGE_ACCESS_TOKEN}, timeout=10)
+        for m in r.json().get("data",[]):
+            vals = m.get("values",[]); val = vals[-1].get("value",0) if vals else 0
+            log.info(f"   📈 {m.get('name')} : {val}")
+    except Exception as e: log.error(f"❌ Rapport: {e}")
 
-
-# ═══════════════════════════════════════════════════════
-#  POINT D'ENTRÉE PRINCIPAL
-# ═══════════════════════════════════════════════════════
-
+# ── MAIN ──
 def demarrer():
-    print("=" * 55)
-    print("  NEXA Services — Automatisation Facebook (Railway)")
-    print("=" * 55)
-
-    if not verifier_config():
-        log.error("Configure les variables dans Railway > Variables et redéploie.")
-        return
-
-    if not test_connexion():
-        log.error("Vérifie ton PAGE_ID et PAGE_ACCESS_TOKEN dans Railway.")
-        return
-
+    print("="*55)
+    print("  NEXA Services — Automatisation Facebook v2")
+    print("  Génération IA + Publication automatique")
+    print("="*55)
+    if not verifier_config(): return
+    if not test_connexion(): return
     charger_posts_publies()
 
-    # Publication immédiate au démarrage
+    # Génération immédiate si CLAUDE_API_KEY présente
+    if CLAUDE_API_KEY:
+        log.info("🤖 CLAUDE_API_KEY détectée — génération automatique activée")
+        generer_et_planifier_semaine()
+    else:
+        log.info("ℹ️ Sans CLAUDE_API_KEY — utilise le fichier NEXA_sauvegarde.json")
+
     publier_posts_du_jour()
 
-    # Planification
-    for h in HEURES:
+    # Planification publications
+    for h in HEURES_PUB:
         schedule.every().day.at(h).do(publier_posts_du_jour)
         log.info(f"⏰ Publication planifiée à {h}")
 
+    # Génération auto chaque lundi à 6h
+    if CLAUDE_API_KEY:
+        schedule.every().monday.at("06:00").do(generer_et_planifier_semaine)
+        log.info("🤖 Génération automatique chaque lundi à 06:00")
+
     schedule.every(15).minutes.do(verifier_messages)
     log.info("💬 Vérification Messenger toutes les 15 min")
-
     schedule.every().monday.at("08:00").do(rapport_hebdomadaire)
     log.info("📊 Rapport hebdomadaire chaque lundi à 08:00")
 
-    log.info("─" * 50)
+    log.info("─"*50)
     log.info("✅ Automatisation active sur Railway 24h/24")
-    log.info("─" * 50)
+    log.info("─"*50)
 
     while True:
         schedule.run_pending()
         time.sleep(30)
-
 
 if __name__ == "__main__":
     demarrer()
